@@ -10,11 +10,11 @@ import scipy.signal
 from gymnasium.spaces import Box, Discrete
 import os
 
+# Import MPI tools from spinup which now handles fallback
 from spinup.utils.logx import EpochLogger
 from spinup.utils.mpi_pytorch import setup_pytorch_for_mpi
-from spinup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
+from spinup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs, MPI
 from tqdm import tqdm
-from mpi4py import MPI
 
 # # Check if GPU is available
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -464,7 +464,9 @@ def dapo(env_fn,
 
     # Prepare for interaction with environment
     start_time = time.time()
-    o, ep_ret, ep_len = env.reset(), 0, 0
+    obs_reset = env.reset()
+    o = obs_reset[0] if isinstance(obs_reset, tuple) else obs_reset
+    ep_ret, ep_len = 0, 0
     state_idx = 0  # Track the state index for group advantage computation
 
     # Main loop: collect experience in env and update/log each epoch
@@ -473,7 +475,7 @@ def dapo(env_fn,
     start_epoch_time = time.time()
     
     # Create directory for checkpoints
-    checkpoint_dir = "/home/ruijian/FinRL_Contest_2025/Task_1_FinRL_DeepSeek_Stock/checkpoint"
+    checkpoint_dir = os.environ.get("DAPO_CHECKPOINT_DIR", "./checkpoint")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     for epoch in range(epochs):
@@ -492,7 +494,13 @@ def dapo(env_fn,
             actions, logps = ac.act_batch(o, num_samples=num_samples_per_state)
             
             # Use the first action to step the environment
-            next_o, r, d, _ = env.step(actions[0])
+            step_result = env.step(actions[0])
+            next_o, r = step_result[0], step_result[1]
+            # Ensure r is a scalar float
+            r = float(r.item() if hasattr(r, 'item') else r)
+            
+            # Support both 4-value (old gym) and 5-value (new gymnasium) step returns
+            d = (step_result[2] or step_result[3]) if len(step_result) >= 5 else step_result[2]
             ep_ret += r
             ep_len += 1
             
@@ -515,6 +523,9 @@ def dapo(env_fn,
                     # For other actions, calculate hypothetical portfolio return
                     base_reward = calculate_portfolio_return(action, current_prices, next_prices)
                 
+                # Ensure base_reward is a scalar float
+                base_reward = float(base_reward.item() if hasattr(base_reward, 'item') else base_reward)
+                
                 # Calculate position values based on this action and next prices
                 position_values = action * next_prices
                 total_value = np.sum(position_values)
@@ -524,13 +535,11 @@ def dapo(env_fn,
                     # If no positions, no adjustment
                     adjusted_reward = base_reward
                 else:
-                    # Define mappings for risk and sentiment scores
-                    risk_to_weight = {1: 0.99, 2: 0.995, 3: 1.0, 4: 1.005, 5: 1.01}
-                    sentiment_to_weight = {1: 0.99, 2: 0.995, 3: 1.0, 4: 1.005, 5: 1.01}
-                    
-                    # Apply mappings to generate weights
-                    llm_risks_weights = np.vectorize(risk_to_weight.get)(llm_risks)
-                    llm_sentiment_weights = np.vectorize(sentiment_to_weight.get)(llm_sentiments)
+                    # Continuous linear mapping for LLM scores (fixes TypeError for continuous values)
+                    # Sentiment: [-1, 1] -> [0.99, 1.01] (1.0 is neutral)
+                    llm_sentiment_weights = 1.0 + (llm_sentiments * 0.01)
+                    # Risk: [0, 1] -> [0.99, 1.01] (0.5 is neutral)
+                    llm_risks_weights = 1.0 + ((llm_risks - 0.5) * 0.02)
                     
                     # Calculate weights based on portfolio allocation
                     stock_weights = position_values / total_value
@@ -543,6 +552,8 @@ def dapo(env_fn,
                     if adjustment_type == 'both':
                         # Use the r_{t,i}' = r_{t,i} u00d7 S_{f,i}^alpha/R_{f,i}^beta formula
                         adjustment_factor = (aggregated_sentiment ** alpha) / ((aggregated_risk ** beta) + 1e-8)
+                        # Ensure adjustment_factor is a scalar
+                        adjustment_factor = float(adjustment_factor.item() if hasattr(adjustment_factor, 'item') else adjustment_factor)
                         adjusted_reward = base_reward * adjustment_factor
                     elif adjustment_type == 'sentiment':
                         # Only use sentiment with exponent
@@ -554,8 +565,13 @@ def dapo(env_fn,
                         # No adjustment
                         adjusted_reward = base_reward
                 
+                # Ensure logp is a scalar float
+                logp = float(logp.item() if hasattr(logp, 'item') else logp)
+                # Ensure action is squeezed to match act_dim (remove batch dim)
+                action_to_store = np.squeeze(action)
+                
                 # Store in buffer with the same state index for all samples
-                buf.store(current_state, action, adjusted_reward, logp, state_idx)
+                buf.store(current_state, action_to_store, adjusted_reward, logp, state_idx)
             
             # Move to next state index after collecting all samples for this state
             state_idx += 1
@@ -585,7 +601,9 @@ def dapo(env_fn,
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
                     
                 # Reset for next episode
-                o, ep_ret, ep_len = env.reset(), 0, 0
+                obs_reset = env.reset()
+                o = obs_reset[0] if isinstance(obs_reset, tuple) else obs_reset
+                ep_ret, ep_len = 0, 0
         
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):

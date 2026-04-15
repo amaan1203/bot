@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+trade-env/
+env/
+venv/
+.env
+
+# Checkpoints and models (Keep your final models, ignore intermediate ones)
+checkpoint/nifty50/agent_dapo_deepseek_gpu_epoch_*.pth
+checkpoint/nifty50/agent_dapo_deepseek_gpu_final.pth
+checkpoint/nifty50/nifty50_dapo_both_a1.0_b1.0.pth
+# checkpoint/nifty50/nifty50_dapo_both_a1.0_b1.0.pth
+# !checkpoint/nifty50/nifty50_dapo_both_a2.0_b2.0.pth
+
+# Logs and Experiments
+/tmp/experiments/
+dapo_results_nifty/
+*.png
+*.csv
+
+# OS-specific
+.DS_Store

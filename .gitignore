@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Environments
+trade-env/
+env/
+venv/
+
+# Checkpoints and Logs
+checkpoint/nifty50/agent_dapo_deepseek_gpu_epoch_*.pth
+/tmp/experiments/
+dapo_results_nifty/
+results/
+
+# Large Docs and Meta
+spinningup/docs/
+spinningup/test/
+.DS_Store
