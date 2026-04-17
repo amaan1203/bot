@@ -301,73 +301,12 @@ class StockTradingEnv(gym.Env):
         else:
             # Handle the current trading day
             try:
-                # Safely get LLM sentiments and risks with proper error handling
-                if len(self.df.tic.unique()) > 1:
-                    # For multiple stocks
-                    llm_sentiments = np.array(self.data[self.llm_sentiment_col].values)
-                    llm_risks = np.array(self.data[self.llm_risk_col].values)
-                else:
-                    # For single stock - convert to array to maintain consistent shape
-                    llm_sentiments = np.array([self.data[self.llm_sentiment_col]])
-                    llm_risks = np.array([self.data[self.llm_risk_col]])
-                
-                # Convert actions to numpy array if not already
+                # Convert actions to numpy array
                 actions = np.array(actions).flatten()
-                
-                # Ensure actions and sentiment/risk arrays match in length
-                if len(llm_sentiments) != len(actions):
-                    print(f"Warning: Sentiment array length ({len(llm_sentiments)}) doesn't match actions length ({len(actions)})")
-                    # Adjust to smaller size for safety
-                    min_len = min(len(llm_sentiments), len(actions))
-                    llm_sentiments = llm_sentiments[:min_len]
-                    llm_risks = llm_risks[:min_len]
-                    actions = actions[:min_len]
-                    
-                    # If we need to extend sentiment/risk arrays:
-                    if len(llm_sentiments) < len(actions):
-                        llm_sentiments = np.pad(llm_sentiments, (0, len(actions) - len(llm_sentiments)), 'constant', constant_values=3)
-                        llm_risks = np.pad(llm_risks, (0, len(actions) - len(llm_risks)), 'constant', constant_values=3)
-                
-                # Create masks for action types
-                buy_mask = (actions > 0)
-                sell_mask = (actions < 0)
 
-                # Create masks based on LLM sentiments
-                strong_sell_mask = np.zeros_like(actions, dtype=bool)
-                moderate_sell_mask = np.zeros_like(actions, dtype=bool)
-                hold_mask = np.zeros_like(actions, dtype=bool)
-                moderate_buy_mask = np.zeros_like(actions, dtype=bool)
-                strong_buy_mask = np.zeros_like(actions, dtype=bool)
-                
-                # Fill in masks safely (ensuring bounds are respected)
-                for i in range(min(len(llm_sentiments), len(actions))):
-                    if i < len(llm_sentiments):
-                        sentiment = llm_sentiments[i]
-                        if sentiment == 1:
-                            strong_sell_mask[i] = True
-                        elif sentiment == 2:
-                            moderate_sell_mask[i] = True
-                        elif sentiment == 3:
-                            hold_mask[i] = True
-                        elif sentiment == 4:
-                            moderate_buy_mask[i] = True
-                        elif sentiment == 5:
-                            strong_buy_mask[i] = True
-
-                # Adjust actions based on combined conditions (safely)
-                # Reduce mismatched strong actions
-                for i in range(len(actions)):
-                    if (strong_sell_mask[i] and buy_mask[i]) or (strong_buy_mask[i] and sell_mask[i]):
-                        actions[i] *= 0.9
-                    # Reduce mismatched moderate actions
-                    elif (moderate_sell_mask[i] and buy_mask[i]) or (moderate_buy_mask[i] and sell_mask[i]):
-                        actions[i] *= 0.95
-                    # Amplify matched strong actions
-                    elif (strong_sell_mask[i] and sell_mask[i]) or (strong_buy_mask[i] and buy_mask[i]):
-                        actions[i] *= 1.1
-                    # Amplify matched moderate actions
-                    elif (moderate_sell_mask[i] and sell_mask[i]) or (moderate_buy_mask[i] and buy_mask[i]):
-                        actions[i] *= 1.05
+                # NOTE: LLM-based reward shaping is handled entirely in DAPOBuffer
+                # (r' = r × S_f^α / R_f^β). The environment stays clean — no
+                # action masking here. See dapo_algorithm.py for the shaping logic.
 
                 # Scale actions according to hmax
                 actions = actions * self.hmax
@@ -440,7 +379,7 @@ class StockTradingEnv(gym.Env):
                 self.reward = self.reward * self.reward_scaling
                 self.state_memory.append(self.state)
 
-                return self.state, self.reward, self.terminal, False, {}
+                return self._normalize_observation(self.state), self.reward, self.terminal, False, {}
                 
             except Exception as e:
                 print(f"Error in step method: {e}")
@@ -489,8 +428,49 @@ class StockTradingEnv(gym.Env):
         self.date_memory = [self._get_date()]
 
         self.episode += 1
+        return self._normalize_observation(self.state), {}
 
-        return self.state, {}
+    def _normalize_observation(self, state: list) -> np.ndarray:
+        """
+        Normalize raw environment state into a range manageable by a neural network.
+        Scales:
+        - Cash: / initial_amount
+        - Prices/SMAs: / 20000
+        - Shares: / 1000
+        - MACD/CCI: / 1000
+        - RSI/DX: / 100
+        """
+        state = np.array(state, dtype=np.float32)
+        stock_dim = self.stock_dim
+        
+        # 1. Cash (index 0)
+        state[0] = state[0] / self.initial_amount
+        
+        # 2. Prices (indices 1 : stock_dim+1)
+        state[1 : stock_dim + 1] = state[1 : stock_dim + 1] / 20000.0
+        
+        # 3. Shares (indices stock_dim+1 : 2*stock_dim+1)
+        state[stock_dim + 1 : 2 * stock_dim + 1] = state[stock_dim + 1 : 2 * stock_dim + 1] / 1000.0
+        
+        # 4. Technical Indicators (indices 2*stock_dim+1 : ...)
+        # We scale based on common ranges for these indicators
+        idx = 2 * stock_dim + 1
+        for tech in self.tech_indicator_list:
+            if tech in ['macd', 'close_30_sma', 'close_60_sma', 'boll_ub', 'boll_lb', 'cci_30']:
+                if 'sma' in tech or 'boll' in tech:
+                    scale = 20000.0
+                else:
+                    scale = 1000.0
+            elif tech in ['rsi_30', 'dx_30']:
+                scale = 100.0
+            else:
+                scale = 1.0  # Default fallback
+                
+            state[idx : idx + stock_dim] = state[idx : idx + stock_dim] / scale
+            idx += stock_dim
+            
+        # llm_sentiment and llm_risk are usually 0-1 or -1-1, so no forced scaling needed
+        return state
 
     def render(self, mode="human", close=False):
         return self.state
@@ -509,7 +489,7 @@ class StockTradingEnv(gym.Env):
                         (self.data[tech].values.tolist() for tech in self.tech_indicator_list),[],)
                     +  self.data[self.llm_sentiment_col].values.tolist()  #add llm sentiment
                     +  self.data[self.llm_risk_col].values.tolist()  #add llm sentiment
-                )  # append initial stocks_share to initial state, instead of all zero
+                )
             else:
                 # for single stock
                 state = (
@@ -537,6 +517,8 @@ class StockTradingEnv(gym.Env):
                         ),
                         [],
                     )
+                    + self.data[self.llm_sentiment_col].values.tolist()  # FIX: was missing in warm-start
+                    + self.data[self.llm_risk_col].values.tolist()        # FIX: was missing in warm-start
                 )
             else:
                 # for single stock
@@ -547,6 +529,8 @@ class StockTradingEnv(gym.Env):
                         (self.stock_dim + 1) : (self.stock_dim * 2 + 1)
                     ]
                     + sum(([self.data[tech]] for tech in self.tech_indicator_list), [])
+                    + [self.data[self.llm_sentiment_col]]  # FIX: was missing in warm-start
+                    + [self.data[self.llm_risk_col]]        # FIX: was missing in warm-start
                 )
 
         return state

@@ -1,0 +1,13 @@
+{
+  "sharpe": 0.543295216816685,
+  "params": {
+    "alpha": 1.5,
+    "beta": 3.0,
+    "pi_lr": 3e-05,
+    "epsilon_low": 0.2,
+    "epsilon_high": 0.35,
+    "gamma": 0.99,
+    "train_pi_iters": 100,
+    "num_samples_per_state": 20
+  }
+}

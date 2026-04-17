@@ -355,18 +355,26 @@ def dapo(env_fn,
     def extract_prices(state):
         """Extract prices from state"""
         stock_dim = env_kwargs["stock_dim"] if env_kwargs and "stock_dim" in env_kwargs else 84
-        return state[0, 1:stock_dim+1]
+        state = np.asarray(state)
+        if state.ndim == 1:
+            return state[1 : stock_dim + 1]
+        return state[0, 1 : stock_dim + 1]
 
     def extract_llm_features(state):
         """Extract LLM sentiment and risk scores from state"""
         stock_dim = env_kwargs["stock_dim"] if env_kwargs and "stock_dim" in env_kwargs else 84
-        # State space structure: [Current Balance] + [Stock Prices] + [Stock Shares] + [Technical Indicators] + [LLM Sentiment] + [LLM Risk]
-        # LLM Sentiment is before LLM Risk in the state space
-        sentiment_start = -(2 * stock_dim)  # Second to last block
-        risk_start = -stock_dim  # Last block
+        state = np.asarray(state)
         
-        llm_sentiments = state[0, sentiment_start:risk_start]
-        llm_risks = state[0, risk_start:]
+        # State space structure: [Current Balance] + [Stock Prices] + [Stock Shares] + [Technical Indicators] + [LLM Sentiment] + [LLM Risk]
+        sentiment_start = -(2 * stock_dim)
+        risk_start = -stock_dim
+        
+        if state.ndim == 1:
+            llm_sentiments = state[sentiment_start:risk_start]
+            llm_risks = state[risk_start:]
+        else:
+            llm_sentiments = state[0, sentiment_start:risk_start]
+            llm_risks = state[0, risk_start:]
         
         return llm_sentiments, llm_risks
 
@@ -548,6 +556,11 @@ def dapo(env_fn,
                     aggregated_sentiment = np.dot(stock_weights, llm_sentiment_weights)
                     aggregated_risk = np.dot(stock_weights, llm_risks_weights)
                     
+                    # Numerical safety: clip to non-negative range [1e-6, 2.0] before power operation
+                    # This prevents RuntimeWarning: invalid value encountered in power if weights/dot go negative
+                    aggregated_sentiment = np.clip(aggregated_sentiment, 1e-6, 2.0)
+                    aggregated_risk = np.clip(aggregated_risk, 1e-6, 2.0)
+
                     # Apply reward adjustment based on the specified adjustment type and exponents
                     if adjustment_type == 'both':
                         # Use the r_{t,i}' = r_{t,i} u00d7 S_{f,i}^alpha/R_{f,i}^beta formula
@@ -594,16 +607,18 @@ def dapo(env_fn,
                 else:
                     last_val = 0
                     
-                buf.finish_path(last_val)
-                
-                if terminal:
-                    # Only save EpRet / EpLen if trajectory finished
+                if terminal or epoch_ended:
+                    # Save EpRet / EpLen even if trajectory was cut off by epoch
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
                     
-                # Reset for next episode
-                obs_reset = env.reset()
-                o = obs_reset[0] if isinstance(obs_reset, tuple) else obs_reset
-                ep_ret, ep_len = 0, 0
+                    if terminal:
+                        # Reset environment only when episode truly finishes
+                        obs_reset = env.reset()
+                        o = obs_reset[0] if isinstance(obs_reset, tuple) else obs_reset
+                        ep_ret, ep_len = 0, 0
+                    else:
+                        # Epoch ended but trajectory continues: bootstrap and continue
+                        buf.finish_path(0)
         
         # Save model
         if (epoch % save_freq == 0) or (epoch == epochs-1):

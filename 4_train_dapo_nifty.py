@@ -113,18 +113,18 @@ def load_and_merge_train_data():
 # ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train DAPO agent on Nifty50 data")
-    parser.add_argument("--hid",            type=int,   default=512)
+    parser.add_argument("--hid",            type=int,   default=256)
     parser.add_argument("--l",              type=int,   default=2,     help="Number of hidden layers")
     parser.add_argument("--seed",     "-s", type=int,   default=42)
-    parser.add_argument("--epochs",         type=int,   default=100)
-    parser.add_argument("--steps",          type=int,   default=20000, help="Steps per epoch")
-    parser.add_argument("--exp_name",       type=str,   default="dapo_nifty50")
+    parser.add_argument("--epochs",         type=int,   default=30)
+    parser.add_argument("--steps",          type=int,   default=32000, help="Steps per epoch")
+    parser.add_argument("--exp_name",       type=str,   default="dapo_nifty50_full_fixed")
     parser.add_argument(
         "--adjustment_type", type=str, default="both",
         choices=["both", "sentiment", "risk", "none"],
     )
-    parser.add_argument("--alpha", type=float, default=1.0, help="Sentiment exponent")
-    parser.add_argument("--beta",  type=float, default=1.0, help="Risk exponent")
+    parser.add_argument("--alpha", type=float, default=1.5, help="Sentiment exponent")
+    parser.add_argument("--beta",  type=float, default=3.0, help="Risk exponent")
     args = parser.parse_args()
 
     # ── Load data ─────────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ if __name__ == "__main__":
 
     env_kwargs = {
         "hmax"              : 100,
-        "initial_amount"    : 1_000_000,
+        "initial_amount"    : 1000000,
         "num_stock_shares"  : [0] * stock_dim,
         "buy_cost_pct"      : [0.001] * stock_dim,   # 0.1% transaction cost
         "sell_cost_pct"     : [0.001] * stock_dim,
@@ -200,6 +200,16 @@ if __name__ == "__main__":
     e_train_gym = StockTradingEnv(df=train, turbulence_threshold=70,
                                   risk_indicator_col="vix", **env_kwargs)
     env_train, _ = e_train_gym.get_sb_env()
+
+    # ── State-dim sanity check ────────────────────────────────────────────────
+    _obs, _ = e_train_gym.reset()
+    _expected = e_train_gym.observation_space.shape[0]
+    assert len(_obs) == _expected, (
+        f"State dim mismatch after reset(): got {len(_obs)}, expected {_expected}. "
+        "Check _initiate_state() — LLM columns must be present in BOTH the "
+        "initial=True AND initial=False (warm-start) branches."
+    )
+    print(f"  State-dim check passed: obs shape = {len(_obs)}")
 
     # ── Training ──────────────────────────────────────────────────────────────
     from dapo_algorithm import dapo, MLPActorCritic
@@ -233,10 +243,13 @@ if __name__ == "__main__":
         steps_per_epoch=args.steps,
         epochs=args.epochs,
         logger_kwargs=logger_kwargs,
-        num_samples_per_state=10,
+        num_samples_per_state=20,
         env_kwargs=env_kwargs,
-        epsilon_low=0.2,
-        epsilon_high=0.28,
+        epsilon_low=0.20,
+        epsilon_high=0.35,
+        pi_lr=3.0e-05,
+        gamma=0.99,
+        train_pi_iters=100,
         adjustment_type=args.adjustment_type,
         alpha=args.alpha,
         beta=args.beta,
